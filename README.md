@@ -4,7 +4,7 @@ A stealthy command line tool to create TCP-over-CDN(http) tunnels that keep your
 
 Join the Discord server for support and discussion: https://discord.gg/Gr9rByrEzZ
 
-Also if you like this tool, check out my other project: https://github.com/doxx/doxx.net which is a more advanced VPN based stealth system for avoiding countries and censorship. 
+Also check out [doxx.net](https://github.com/doxx/doxx.net), a privacy network and device management platform with encrypted tunnels, DNS blocking, and firewall rules. [WireSlammer](https://github.com/doxx/wireslammer) (coming soon) is the next evolution: WireGuard over anything (TCP, CDN, WebSocket).
 
 ## 🤔 What is this sorcery?
 
