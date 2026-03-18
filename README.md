@@ -1,15 +1,15 @@
 # DarkFlare - TCP-over-CDN Tunnel
 
-DarkFlare tunnels arbitrary TCP traffic through HTTP(S) connections routed via CDN infrastructure (Cloudflare, Akamai, Fastly, CloudFront, etc.). The traffic is encapsulated in requests that conform to typical browser patterns, making it indistinguishable from normal web traffic at the network layer.
+DarkFlare tunnels arbitrary TCP traffic through HTTP(S) connections routed via Cloudflare's CDN infrastructure. The traffic is encapsulated in requests that conform to typical browser patterns, making it indistinguishable from normal web traffic at the network layer.
 
 ## Overview
 
 DarkFlare consists of two components:
 
-- **darkflare-client** -- Accepts local TCP connections (or stdin/stdout), encodes the data into HTTP(S) requests with browser-like headers, and sends them to a CDN-protected endpoint.
+- **darkflare-client** -- Accepts local TCP connections (or stdin/stdout), encodes the data into HTTP(S) requests with browser-like headers, and sends them to a Cloudflare-protected endpoint.
 - **darkflare-server** -- Receives those requests, decodes the encapsulated data, and forwards it as raw TCP to the target service (e.g., SSH on port 22).
 
-The protocol is transport-agnostic: any TCP-based service can be tunneled. Security depends on the encryption of the underlying transport (TLS to the CDN, and whatever protocol runs inside the tunnel). DarkFlare provides obfuscation, not encryption -- always use end-to-end encryption (SSH, TLS, etc.) for sensitive traffic.
+The protocol is transport-agnostic: any TCP-based service can be tunneled. Security depends on the encryption of the underlying transport (TLS to Cloudflare, and whatever protocol runs inside the tunnel). DarkFlare provides obfuscation, not encryption -- always use end-to-end encryption (SSH, TLS, etc.) for sensitive traffic.
 
 ```
                             FIREWALL/CENSORSHIP
@@ -30,23 +30,23 @@ or stdin/out  |            |                  |            |
 
 Flow:
 1. TCP traffic --> darkflare-client
-2. Wrapped as HTTPS --> Cloudflare CDN (or any CDN)
+2. Wrapped as HTTPS --> Cloudflare CDN
 3. Forwarded to --> darkflare-server
 4. Unwrapped back to TCP --> Target Service
 ```
 
-## Why CDNs
+## Why Cloudflare
 
-CDN providers such as Cloudflare, Akamai, Fastly, and Amazon CloudFront are deeply embedded in global internet infrastructure. They serve millions of domains across government, healthcare, finance, and other critical sectors. Blocking CDN IP ranges causes significant collateral damage, which makes CDN-routed traffic resistant to network-level censorship. Regional alternatives (CDNetworks in Russia, ArvanCloud in Iran, ChinaCache in China) may provide similar properties in jurisdictions where global CDNs are less prevalent.
+Cloudflare is deeply embedded in global internet infrastructure, serving millions of domains across government, healthcare, finance, and other critical sectors. Blocking Cloudflare's IP ranges causes significant collateral damage, which makes Cloudflare-routed traffic resistant to network-level censorship.
 
 ## Censorship Circumvention
 
-In countries that employ deep packet inspection and IP-based blocking (China's Great Firewall, Iran's filtering infrastructure, Russia's VPN restrictions), DarkFlare tunnels TCP traffic through HTTPS connections to CDN endpoints that cannot be blocked without disrupting access to large portions of the web. The traffic profile matches normal browser activity, avoiding heuristic detection.
+In countries that employ deep packet inspection and IP-based blocking (China's Great Firewall, Iran's filtering infrastructure, Russia's VPN restrictions), DarkFlare tunnels TCP traffic through HTTPS connections to Cloudflare endpoints that cannot be blocked without disrupting access to large portions of the web. The traffic profile matches normal browser activity, avoiding heuristic detection.
 
 ## Features
 
 - Protocol-agnostic TCP tunneling over HTTP/HTTPS
-- CDN integration (Cloudflare and others) for traffic obfuscation
+- Cloudflare integration for traffic obfuscation
 - Client-controlled destination addressing via base64-encoded headers
 - Server-side destination override (`-override-dest`)
 - SOCKS5 and HTTP(S) proxy support (`-p`)
@@ -148,7 +148,7 @@ When using both stdin/stdout mode and an outbound proxy:
     |                     |                      |                   |
     |   stdin/stdout      |       HTTPS          |      TCP          |
     | =================>  |  =================>  | =================>|
-    |  darkflare-client   |    CDN Traffic       |  darkflare-server |
+    |  darkflare-client   | Cloudflare Traffic   |  darkflare-server |
 ```
 
 ## Use Cases
@@ -156,7 +156,7 @@ When using both stdin/stdout mode and an outbound proxy:
 - SSH, RDP, or any TCP service through restrictive firewalls or state-controlled networks
 - Tunneling TCP-based VPN protocols (OpenVPN over TCP, PPP)
 - Application launching via darkflare-server (`-a` flag) for sshd, pppd, etc.
-- Accessing blocked services through CDN infrastructure
+- Accessing blocked services through Cloudflare infrastructure
 
 ### OpenVPN / NordVPN
 
@@ -191,7 +191,7 @@ Keep the private key secure. Origin certificates are only valid for traffic betw
 
 ### CA Root Certificates
 
-If direct connections (without CDN) fail TLS verification, ensure system CA certificates are installed:
+If direct connections (without Cloudflare) fail TLS verification, ensure system CA certificates are installed:
 
 ```bash
 # Debian/Ubuntu
