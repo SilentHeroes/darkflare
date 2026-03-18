@@ -41,7 +41,7 @@ Cloudflare is deeply embedded in global internet infrastructure, serving million
 
 ## Censorship Circumvention
 
-In countries that employ deep packet inspection and IP-based blocking (China's Great Firewall, Iran's filtering infrastructure, Russia's VPN restrictions), DarkFlare tunnels TCP traffic through HTTPS connections to Cloudflare endpoints that cannot be blocked without disrupting access to large portions of the web. The traffic profile matches normal browser activity, avoiding heuristic detection.
+In networks that employ deep packet inspection and IP-based blocking, DarkFlare tunnels TCP traffic through HTTPS connections to Cloudflare endpoints that cannot be blocked without disrupting access to large portions of the web. The traffic profile matches normal browser activity, avoiding heuristic detection.
 
 ## Features
 
