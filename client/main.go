@@ -65,8 +65,6 @@ func generateSessionID() string {
 }
 
 func NewClient(cloudflareHost string, destPort int, scheme string, destAddr string, debug bool, proxyURL string, username string, password string, insecureTLS bool) *Client {
-	rand.Seed(time.Now().UnixNano())
-
 	if scheme == "" {
 		scheme = "https"
 	}
@@ -128,12 +126,12 @@ func NewClient(cloudflareHost string, destPort int, scheme string, destAddr stri
 			InsecureSkipVerify:       false,
 			NextProtos:               []string{"http/1.1"},
 		},
-		MaxIdleConns:          1,
+		MaxIdleConns:          10,
 		IdleConnTimeout:       90 * time.Second,
 		DisableCompression:    true,
 		ForceAttemptHTTP2:     false,
-		MaxIdleConnsPerHost:   1,
-		MaxConnsPerHost:       1,
+		MaxIdleConnsPerHost:   10,
+		MaxConnsPerHost:       10,
 		WriteBufferSize:       32 * 1024,
 		ReadBufferSize:        32 * 1024,
 		ResponseHeaderTimeout: 30 * time.Second,
@@ -250,11 +248,11 @@ func (c *Client) createDebugRequest(method, baseURL string, body io.Reader, clos
 	req.Header.Set("Expires", "0")
 
 	// Modern Chrome headers
-	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36")
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36")
 	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7")
 	req.Header.Set("Accept-Language", "en-US,en;q=0.9")
 	req.Header.Set("Accept-Encoding", "gzip, deflate, br")
-	req.Header.Set("Sec-Ch-Ua", "\"Chromium\";v=\"122\", \"Not(A:Brand\";v=\"24\", \"Google Chrome\";v=\"122\"")
+	req.Header.Set("Sec-Ch-Ua", "\"Chromium\";v=\"134\", \"Not:A-Brand\";v=\"24\", \"Google Chrome\";v=\"134\"")
 	req.Header.Set("Sec-Ch-Ua-Mobile", "?0")
 	req.Header.Set("Sec-Ch-Ua-Platform", "\"Windows\"")
 	req.Header.Set("Sec-Fetch-Dest", "document")

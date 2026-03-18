@@ -414,7 +414,10 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 		session.conn.SetReadDeadline(time.Now().Add(100 * time.Millisecond)) // Increased from 10ms to 100ms
 		n, err := session.conn.Read(buffer)
 		if err != nil {
-			if err != io.EOF && !err.(net.Error).Timeout() {
+			if err != io.EOF {
+				if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+					break
+				}
 				if s.debug {
 					log.Printf("Error reading from connection: %v", err)
 				}
