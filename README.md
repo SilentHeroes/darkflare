@@ -2,10 +2,6 @@
 
 DarkFlare tunnels arbitrary TCP traffic through HTTP(S) connections routed via CDN infrastructure (Cloudflare, Akamai, Fastly, CloudFront, etc.). The traffic is encapsulated in requests that conform to typical browser patterns, making it indistinguishable from normal web traffic at the network layer.
 
-Join the Discord server for support and discussion: https://discord.gg/Gr9rByrEzZ
-
-See also: [doxx.net](https://github.com/doxx/doxx.net), a freedom of speech and privacy platform with encrypted tunnels, DNS blocking, and firewall rules. [WireSlammer](https://github.com/doxx/wireslammer) (coming soon) extends this concept to WireGuard over TCP, CDN, and WebSocket transports.
-
 ## Overview
 
 DarkFlare consists of two components:
@@ -65,7 +61,7 @@ In countries that employ deep packet inspection and IP-based blocking (China's G
 
 ## Installation
 
-1. Download the latest release from the [GitHub Releases page](https://github.com/doxx/darkflare/releases).
+1. Download the latest release from the GitHub Releases page.
    - Binaries are available for:
      - `darkflare-client-darwin-arm64` -- macOS Apple Silicon
      - `darkflare-client-darwin-amd64` -- macOS Intel
@@ -212,7 +208,7 @@ DLL variants are available in `bin/dll/` for memory-only execution:
 - `darkflare-client-windows-386.dll` (32-bit)
 - `darkflare-client-windows-amd64.dll` (64-bit)
 
-These can be loaded from C# or C++ applications without writing to disk. See [Embedding Golang Tools in C#/C++](https://medium.com/@shantanukhande/red-team-how-to-embed-golang-tools-in-c-e269bf33876a) for implementation details.
+These can be loaded from C# or C++ applications without writing to disk.
 
 This feature is intended for authorized testing scenarios only.
 
@@ -289,12 +285,10 @@ This tool is provided for educational and authorized use only. Users are respons
 
 ## Contributing
 
-Bug reports and pull requests are welcome at [github.com/doxx/darkflare](https://github.com/doxx/darkflare).
+Bug reports and pull requests are welcome.
 
 ## License
 
 MIT License
 
 ---
-
-Join the Discord server for support and discussion: https://discord.gg/Gr9rByrEzZ
