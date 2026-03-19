@@ -1,0 +1,72 @@
+name: Build
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.23'
+
+      - name: Build client binaries
+        run: |
+          mkdir -p bin
+          GOOS=linux GOARCH=amd64 go build -o bin/darkflare-client-linux-amd64 client/main.go
+          GOOS=linux GOARCH=arm64 go build -o bin/darkflare-client-linux-arm64 client/main.go
+          GOOS=darwin GOARCH=amd64 go build -o bin/darkflare-client-darwin-amd64 client/main.go
+          GOOS=darwin GOARCH=arm64 go build -o bin/darkflare-client-darwin-arm64 client/main.go
+          GOOS=windows GOARCH=amd64 go build -o bin/darkflare-client-windows-amd64.exe client/main.go
+
+      - name: Build server binaries
+        run: |
+          GOOS=linux GOARCH=amd64 go build -o bin/darkflare-server-linux-amd64 server/main.go
+          GOOS=linux GOARCH=arm64 go build -o bin/darkflare-server-linux-arm64 server/main.go
+          GOOS=darwin GOARCH=amd64 go build -o bin/darkflare-server-darwin-amd64 server/main.go
+          GOOS=darwin GOARCH=arm64 go build -o bin/darkflare-server-darwin-arm64 server/main.go
+          GOOS=windows GOARCH=amd64 go build -o bin/darkflare-server-windows-amd64.exe server/main.go
+
+      - name: Install mingw for DLL builds
+        run: sudo apt-get update && sudo apt-get install -y gcc-mingw-w64
+
+      - name: Build DLLs
+        run: |
+          mkdir -p bin/dll
+          CGO_ENABLED=1 GOOS=windows GOARCH=amd64 CC=x86_64-w64-mingw32-gcc \
+            go build --buildmode=c-shared -ldflags="-s -w" \
+            -o bin/dll/darkflare-client-windows-amd64.dll client/main.go
+          CGO_ENABLED=1 GOOS=windows GOARCH=386 CC=i686-w64-mingw32-gcc \
+            go build --buildmode=c-shared -ldflags="-s -w" \
+            -o bin/dll/darkflare-client-windows-386.dll client/main.go
+
+      - name: Generate checksums
+        run: |
+          cd bin
+          echo "# DarkFlare Binary Checksums" > checksums.txt
+          echo "# Generated: $(date -u)" >> checksums.txt
+          echo "" >> checksums.txt
+          find . -type f ! -name checksums.txt -exec sha256sum {} \; >> checksums.txt
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: darkflare-binaries
+          path: bin/
+
+      - name: Create release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            bin/darkflare-client-*
+            bin/darkflare-server-*
+            bin/dll/*
+            bin/checksums.txt
