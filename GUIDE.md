@@ -1,6 +1,6 @@
 # DarkFlare Setup Guide
 
-This guide walks through every step required to deploy DarkFlare, from initial setup through production operation. It covers the server, client, Cloudflare configuration, SSH integration, VPN tunneling, authentication, and troubleshooting.
+This guide walks through every step required to deploy DarkFlare, from initial setup through production operation. It covers the server, client, Cloudflare configuration, SSH integration, UDP tunneling, VPN tunneling, authentication, and troubleshooting.
 
 ---
 
@@ -110,24 +110,32 @@ DarkFlare has two components that work together:
 ```
 [Client Machine]                [Cloudflare]                [Server Machine]
 
-  TCP Application                                             Target Service
-  (e.g., ssh)                                                 (e.g., sshd)
+  TCP/UDP Application                                         Target Service
+  (e.g., ssh, DNS)                                            (e.g., sshd, DNS)
        |                                                           ^
        v                                                           |
   darkflare-client              Cloudflare                    darkflare-server
   Listens on a local     --->   Reverse Proxy    --->         Listens on a port
-  TCP port (e.g., 2222)         (your domain)                 (e.g., 8080)
-  or stdin/stdout                                             Forwards TCP to
-                                                              the target service
+  TCP or UDP port               (your domain)                 (e.g., 8080)
+  (e.g., 2222) or                                             Forwards TCP/UDP
+  stdin/stdout                                                to the target service
 ```
 
-**How data flows:**
+**How data flows (TCP mode, default):**
 
 1. A TCP application (such as an SSH client) connects to darkflare-client on a local port.
 2. darkflare-client reads the TCP data, wraps it in an HTTP POST request with browser-like headers, and sends it to your Cloudflare-proxied domain.
 3. Cloudflare forwards the request to your origin server where darkflare-server is running.
 4. darkflare-server extracts the TCP data from the HTTP request and writes it to a TCP connection to the target service.
 5. Response data flows back the same way: darkflare-server buffers data from the target service, and darkflare-client polls for it with HTTP GET requests.
+
+**How data flows (UDP mode, `-proto udp`):**
+
+1. A UDP application sends a datagram to darkflare-client on a local UDP port.
+2. darkflare-client sends each datagram as an individual HTTP POST to the server.
+3. darkflare-server extracts the datagram and sends it via UDP to the target service.
+4. darkflare-server buffers incoming UDP response datagrams. When the client polls with GET, the server returns all buffered datagrams using 4-byte big-endian length-prefix framing, hex-encoded.
+5. darkflare-client decodes the response and sends each datagram back to the original UDP client.
 
 The client uses HTTP POST to send data upstream and HTTP GET to poll for downstream data. Each request includes randomized URL paths (e.g., `/a3kf9x.jpg`, `/m2nq.php`) and standard browser headers (User-Agent, Accept, Sec-Ch-Ua, etc.) so the traffic looks like normal web browsing to any network observer.
 
@@ -290,9 +298,9 @@ Then start the server with these files:
 
 ## 6. Client Setup
 
-The client runs on the machine where you want to initiate tunneled connections. It listens for local TCP connections and forwards them through Cloudflare to the server.
+The client runs on the machine where you want to initiate tunneled connections. It listens for local TCP or UDP connections and forwards them through Cloudflare to the server.
 
-### Basic Usage
+### Basic TCP Usage
 
 To tunnel SSH (port 22) through Cloudflare:
 
@@ -337,6 +345,26 @@ The `-d` flag specifies the final destination for the TCP traffic. This address 
 ```
 
 The server validates this destination (DNS resolution, port range 1-65535) before connecting.
+
+### UDP Mode
+
+To tunnel UDP traffic (DNS, WireGuard, game servers, etc.), use `-proto udp`:
+
+```bash
+# Tunnel DNS queries to 8.8.8.8
+./darkflare-client -l 5353 -t https://tunnel.yourdomain.com -d 8.8.8.8:53 -proto udp
+
+# Query through the tunnel
+dig @localhost -p 5353 example.com
+```
+
+In UDP mode:
+- The client listens on a local UDP socket instead of TCP.
+- Each incoming UDP datagram is sent as an individual HTTP POST.
+- The client polls with GET requests to receive response datagrams from the server.
+- The server automatically detects the protocol from the client's headers. No server-side flag is needed.
+- UDP sessions time out after 2 minutes of inactivity (vs 5 minutes for TCP).
+- stdin/stdout mode is not supported with UDP.
 
 ### Specifying the Scheme and Port
 
@@ -450,7 +478,24 @@ Response: Sending 48 bytes (encoded: 96 bytes) for session a1b2c3d4
 
 This confirms data is flowing in both directions through the tunnel.
 
-### Step 6: Test Through Cloudflare
+### Step 6: Test UDP Mode
+
+To verify UDP tunneling works locally:
+
+```bash
+# Terminal 1: Start the server
+./darkflare-server -o http://0.0.0.0:8080 -allow-direct
+
+# Terminal 2: Start the client in UDP mode, tunneling to a public DNS server
+./darkflare-client -l 5353 -t http://localhost:8080 -d 8.8.8.8:53 -proto udp
+
+# Terminal 3: Send a DNS query through the tunnel
+dig @localhost -p 5353 example.com
+```
+
+You should see a DNS response with IP addresses for `example.com`.
+
+### Step 7: Test Through Cloudflare
 
 Once local testing works, switch to testing through Cloudflare:
 
@@ -842,6 +887,11 @@ Required:
             This value is sent to the server, which connects to it.
 
 Optional:
+  -proto    Protocol for local listener and destination.
+            tcp (default) or udp.
+            In UDP mode, the client listens on a local UDP socket
+            and each datagram is tunneled individually.
+
   -p        Outbound proxy URL.
             Format: scheme://[user:pass@]host:port
             Supported: http, https, socks5, socks5h.
