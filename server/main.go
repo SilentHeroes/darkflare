@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"crypto/tls"
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/hex"
 	"flag"
 	"fmt"
@@ -21,9 +22,12 @@ import (
 )
 
 type Session struct {
-	conn       net.Conn
+	conn       net.Conn       // TCP connection (nil for UDP)
+	udpConn    net.PacketConn // UDP connection (nil for TCP)
+	proto      string         // "tcp" or "udp"
 	lastActive time.Time
-	buffer     []byte
+	buffer     []byte   // TCP buffer
+	udpBuffer  [][]byte // UDP datagram buffer
 	mu         sync.Mutex
 }
 
@@ -72,8 +76,17 @@ func (s *Server) cleanupSessions() {
 		s.sessions.Range(func(key, value interface{}) bool {
 			session := value.(*Session)
 			session.mu.Lock()
-			if now.Sub(session.lastActive) > 5*time.Minute {
-				session.conn.Close()
+			timeout := 5 * time.Minute
+			if session.proto == "udp" {
+				timeout = 2 * time.Minute
+			}
+			if now.Sub(session.lastActive) > timeout {
+				if session.conn != nil {
+					session.conn.Close()
+				}
+				if session.udpConn != nil {
+					session.udpConn.Close()
+				}
 				s.sessions.Delete(key)
 			}
 			session.mu.Unlock()
@@ -210,6 +223,7 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var destination string
+	proto := "tcp" // default protocol
 	if s.overrideDest != "" {
 		destination = s.overrideDest
 		if s.debug {
@@ -221,7 +235,17 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "Invalid destination encoding", http.StatusBadRequest)
 			return
 		}
-		destination = string(destBytes)
+		destStr := string(destBytes)
+		// Parse protocol prefix: "udp:host:port" or "tcp:host:port" or "host:port"
+		if strings.HasPrefix(destStr, "udp:") {
+			proto = "udp"
+			destination = destStr[4:]
+		} else if strings.HasPrefix(destStr, "tcp:") {
+			proto = "tcp"
+			destination = destStr[4:]
+		} else {
+			destination = destStr
+		}
 	}
 
 	// Check for connection termination
@@ -233,7 +257,12 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 		log.Printf("Disconnect: %s [%s]", clientIP, sessionDisplay)
 		if sessionInterface, exists := s.sessions.LoadAndDelete(sessionID); exists {
 			session := sessionInterface.(*Session)
-			session.conn.Close()
+			if session.conn != nil {
+				session.conn.Close()
+			}
+			if session.udpConn != nil {
+				session.udpConn.Close()
+			}
 		}
 		return
 	}
@@ -358,6 +387,86 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 	var session *Session
 	sessionInterface, exists := s.sessions.Load(sessionID)
 	if !exists {
+		if proto == "udp" {
+			udpConn, err := net.ListenPacket("udp", ":0")
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+
+			destUDPAddr, err := net.ResolveUDPAddr("udp", fmt.Sprintf("%s:%s", host, port))
+			if err != nil {
+				udpConn.Close()
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+
+			session = &Session{
+				udpConn:    udpConn,
+				proto:      "udp",
+				lastActive: time.Now(),
+				udpBuffer:  make([][]byte, 0),
+			}
+			s.sessions.Store(sessionID, session)
+
+			// Background goroutine to read incoming UDP datagrams from destination
+			go func() {
+				buf := make([]byte, 65535)
+				for {
+					udpConn.SetReadDeadline(time.Now().Add(2 * time.Minute))
+					n, _, err := udpConn.ReadFrom(buf)
+					if err != nil {
+						if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+							// Check if session still exists
+							if _, exists := s.sessions.Load(sessionID); !exists {
+								return
+							}
+							continue
+						}
+						return
+					}
+					if n > 0 {
+						dgram := make([]byte, n)
+						copy(dgram, buf[:n])
+						session.mu.Lock()
+						if len(session.udpBuffer) < 256 {
+							session.udpBuffer = append(session.udpBuffer, dgram)
+						}
+						session.mu.Unlock()
+					}
+				}
+			}()
+
+			// Send the initial datagram if this is a POST
+			if r.Method == http.MethodPost {
+				data, err := io.ReadAll(r.Body)
+				if err != nil {
+					if s.debug {
+						log.Printf("Error reading request body: %v", err)
+					}
+					http.Error(w, err.Error(), http.StatusInternalServerError)
+					return
+				}
+				if len(data) > 0 {
+					if s.debug {
+						log.Printf("POST: Sending %d byte UDP datagram for session %s", len(data), sessionID[:8])
+					}
+					_, err = udpConn.WriteTo(data, destUDPAddr)
+					if err != nil {
+						if s.debug {
+							log.Printf("Error writing UDP datagram: %v", err)
+						}
+						http.Error(w, err.Error(), http.StatusInternalServerError)
+						return
+					}
+				}
+				return
+			}
+			// New session GET with no data yet
+			return
+		}
+
+		// TCP session
 		conn, err := net.Dial("tcp", fmt.Sprintf("%s:%s", host, port))
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -366,6 +475,7 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 
 		session = &Session{
 			conn:       conn,
+			proto:      "tcp",
 			lastActive: time.Now(),
 			buffer:     make([]byte, 0),
 		}
@@ -378,6 +488,60 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 	defer session.mu.Unlock()
 	session.lastActive = time.Now()
 
+	// UDP session handling
+	if session.proto == "udp" {
+		if r.Method == http.MethodPost {
+			data, err := io.ReadAll(r.Body)
+			if err != nil {
+				if s.debug {
+					log.Printf("Error reading request body: %v", err)
+				}
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			if len(data) > 0 {
+				destUDPAddr, err := net.ResolveUDPAddr("udp", fmt.Sprintf("%s:%s", host, port))
+				if err != nil {
+					http.Error(w, err.Error(), http.StatusInternalServerError)
+					return
+				}
+				if s.debug {
+					log.Printf("POST: Sending %d byte UDP datagram for session %s", len(data), sessionID[:8])
+				}
+				_, err = session.udpConn.WriteTo(data, destUDPAddr)
+				if err != nil {
+					if s.debug {
+						log.Printf("Error writing UDP datagram: %v", err)
+					}
+					http.Error(w, err.Error(), http.StatusInternalServerError)
+					return
+				}
+			}
+			return
+		}
+
+		// GET: return buffered datagrams with length-prefix framing
+		if len(session.udpBuffer) > 0 {
+			numDatagrams := len(session.udpBuffer)
+			var buf []byte
+			for _, dgram := range session.udpBuffer {
+				lenBytes := make([]byte, 4)
+				binary.BigEndian.PutUint32(lenBytes, uint32(len(dgram)))
+				buf = append(buf, lenBytes...)
+				buf = append(buf, dgram...)
+			}
+			session.udpBuffer = session.udpBuffer[:0]
+			encoded := hex.EncodeToString(buf)
+			if s.debug {
+				log.Printf("Response: Sending %d UDP datagrams (encoded: %d bytes) for session %s",
+					numDatagrams, len(encoded), sessionID[:8])
+			}
+			w.Write([]byte(encoded))
+		}
+		return
+	}
+
+	// TCP session handling
 	if r.Method == http.MethodPost {
 		data, err := io.ReadAll(r.Body)
 		if err != nil {
@@ -391,7 +555,7 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 			if s.debug {
 				log.Printf("POST: Writing %d bytes to connection for session %s",
 					len(data),
-					sessionID[:8], // First 8 chars of session ID for brevity
+					sessionID[:8],
 				)
 			}
 			_, err = session.conn.Write(data)
@@ -411,7 +575,7 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 	readData := make([]byte, 0, 64*1024) // 64KB initial capacity
 
 	for {
-		session.conn.SetReadDeadline(time.Now().Add(100 * time.Millisecond)) // Increased from 10ms to 100ms
+		session.conn.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
 		n, err := session.conn.Read(buffer)
 		if err != nil {
 			if err != io.EOF {
@@ -429,7 +593,7 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 		if n > 0 {
 			readData = append(readData, buffer[:n]...)
 		}
-		if n < len(buffer) || len(readData) >= 64*1024 { // Added size limit check
+		if n < len(buffer) || len(readData) >= 64*1024 {
 			break
 		}
 	}

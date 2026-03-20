@@ -6,6 +6,7 @@ import (
 	cryptorand "crypto/rand"
 	"crypto/tls"
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/hex"
 	"flag"
 	"fmt"
@@ -53,6 +54,7 @@ type Client struct {
 	username     string
 	password     string
 	insecureTLS  bool // Added for -insecure flag
+	proto        string // "tcp" or "udp"
 }
 
 func generateSessionID() string {
@@ -64,7 +66,7 @@ func generateSessionID() string {
 	return hex.EncodeToString(b)
 }
 
-func NewClient(cloudflareHost string, destPort int, scheme string, destAddr string, debug bool, proxyURL string, username string, password string, insecureTLS bool) *Client {
+func NewClient(cloudflareHost string, destPort int, scheme string, destAddr string, debug bool, proxyURL string, username string, password string, insecureTLS bool, proto string) *Client {
 	if scheme == "" {
 		scheme = "https"
 	}
@@ -92,6 +94,7 @@ func NewClient(cloudflareHost string, destPort int, scheme string, destAddr stri
 		proxyURL:        proxyURL,
 		username:     username,
 		password:     password,
+		proto: proto,
 		bufferPool: sync.Pool{
 			New: func() interface{} {
 				return make([]byte, 64*1024)
@@ -263,8 +266,8 @@ func (c *Client) createDebugRequest(method, baseURL string, body io.Reader, clos
 	req.Header.Set("Connection", "keep-alive")
 	req.Header.Set("DNT", "1")
 
-	// Base64 encode the destination (using the -d parameter)
-	destString := c.destAddr
+	// Base64 encode the destination with protocol prefix (using the -d parameter)
+	destString := c.proto + ":" + c.destAddr
 	encodedDest := base64.StdEncoding.EncodeToString([]byte(destString))
 
 	// Add the encoded destination to headers
@@ -377,6 +380,164 @@ func (c *Client) handleConnection(conn net.Conn) {
 			resp.Body.Close()
 		}
 	}
+}
+
+func (c *Client) handleUDPConnection(localPort int) {
+	udpAddr, err := net.ResolveUDPAddr("udp", fmt.Sprintf(":%d", localPort))
+	if err != nil {
+		log.Fatalf("Failed to resolve UDP address: %v", err)
+	}
+
+	udpConn, err := net.ListenUDP("udp", udpAddr)
+	if err != nil {
+		log.Fatalf("Failed to listen on UDP port %d: %v", localPort, err)
+	}
+	defer udpConn.Close()
+
+	log.Printf("DarkFlare client listening on UDP port %d", localPort)
+	log.Printf("Connecting via %s://%s:%d (UDP mode)", c.scheme, c.cloudflareHost, c.destPort)
+
+	type udpSession struct {
+		clientAddr *net.UDPAddr
+		sessionID  string
+		lastActive time.Time
+		mu         sync.Mutex
+	}
+
+	sessions := make(map[string]*udpSession)
+	var sessionsMu sync.Mutex
+
+	buf := make([]byte, 65535)
+	for {
+		n, remoteAddr, err := udpConn.ReadFromUDP(buf)
+		if err != nil {
+			c.debugLog("UDP read error: %v", err)
+			continue
+		}
+
+		addrKey := remoteAddr.String()
+		sessionsMu.Lock()
+		sess, exists := sessions[addrKey]
+		if !exists {
+			sess = &udpSession{
+				clientAddr: remoteAddr,
+				sessionID:  generateSessionID(),
+				lastActive: time.Now(),
+			}
+			sessions[addrKey] = sess
+
+			// Start polling goroutine for this UDP client
+			go func(s *udpSession, key string) {
+				ticker := time.NewTicker(c.pollInterval)
+				defer ticker.Stop()
+				defer func() {
+					sessionsMu.Lock()
+					delete(sessions, key)
+					sessionsMu.Unlock()
+				}()
+
+				for range ticker.C {
+					s.mu.Lock()
+					if time.Since(s.lastActive) > 2*time.Minute {
+						s.mu.Unlock()
+						return
+					}
+					s.mu.Unlock()
+
+					ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+					datagrams, err := c.pollUDPData(ctx, s.sessionID)
+					cancel()
+					if err != nil {
+						c.debugLog("UDP poll error for %s: %v", key, err)
+						return
+					}
+					for _, dgram := range datagrams {
+						_, err := udpConn.WriteToUDP(dgram, s.clientAddr)
+						if err != nil {
+							c.debugLog("UDP write error to %s: %v", key, err)
+							return
+						}
+					}
+				}
+			}(sess, addrKey)
+		}
+		sess.mu.Lock()
+		sess.lastActive = time.Now()
+		sess.mu.Unlock()
+		sessionsMu.Unlock()
+
+		// Send the datagram via POST
+		datagram := make([]byte, n)
+		copy(datagram, buf[:n])
+		go func(sid string) {
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			if err := c.sendData(ctx, sid, datagram, false); err != nil {
+				c.debugLog("UDP send error: %v", err)
+			}
+		}(sess.sessionID)
+	}
+}
+
+func (c *Client) pollUDPData(ctx context.Context, sessionID string) ([][]byte, error) {
+	req, err := c.createDebugRequest(http.MethodGet, c.cloudflareHost, nil, false)
+	if err != nil {
+		return nil, err
+	}
+
+	req = req.WithContext(ctx)
+	req.Header.Set("X-For", sessionID)
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, c.maxBodySize))
+		c.handleResponse(resp, body)
+		return nil, fmt.Errorf("unexpected status: %d", resp.StatusCode)
+	}
+
+	data, err := io.ReadAll(io.LimitReader(resp.Body, c.maxBodySize))
+	if err != nil {
+		return nil, err
+	}
+
+	if len(data) == 0 {
+		return nil, nil
+	}
+
+	// Check for HTML error responses
+	if bytes.Contains(data, []byte("<!DOCTYPE html>")) || bytes.Contains(data, []byte("<html>")) {
+		return nil, fmt.Errorf("received HTML response instead of tunnel data")
+	}
+
+	decoded, err := hex.DecodeString(string(data))
+	if err != nil {
+		return nil, fmt.Errorf("error decoding data: %v", err)
+	}
+
+	// Parse length-prefixed datagrams
+	var datagrams [][]byte
+	reader := bytes.NewReader(decoded)
+	for reader.Len() > 0 {
+		var length uint32
+		if err := binary.Read(reader, binary.BigEndian, &length); err != nil {
+			return nil, fmt.Errorf("error reading datagram length: %v", err)
+		}
+		if int(length) > reader.Len() {
+			return nil, fmt.Errorf("datagram length %d exceeds remaining data %d", length, reader.Len())
+		}
+		dgram := make([]byte, length)
+		if _, err := io.ReadFull(reader, dgram); err != nil {
+			return nil, fmt.Errorf("error reading datagram: %v", err)
+		}
+		datagrams = append(datagrams, dgram)
+	}
+
+	return datagrams, nil
 }
 
 func (c *Client) sendData(ctx context.Context, sessionID string, data []byte, closeConnection bool) error {
@@ -525,6 +686,7 @@ func main() {
 	var debug bool
 	var proxyURL string
 	var insecureTLS bool // Added for -insecure flag
+	var proto string
 
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "DarkFlare Client - TCP-over-CDN tunnel client component\n")
@@ -548,6 +710,8 @@ func main() {
 		fmt.Fprintf(os.Stderr, "            Format: scheme://[user:pass@]host:port\n")
 		fmt.Fprintf(os.Stderr, "            Supported schemes: http, https, socks5, socks5h\n\n")
 		fmt.Fprintf(os.Stderr, "  -insecure Disable TLS certificate verification (use with caution)\n\n")
+		fmt.Fprintf(os.Stderr, "  -proto    Protocol for local listener and destination (tcp or udp)\n")
+		fmt.Fprintf(os.Stderr, "            Default: tcp\n\n")
 		fmt.Fprintf(os.Stderr, "Examples:\n")
 		fmt.Fprintf(os.Stderr, "  Basic SSH tunnel:\n")
 		fmt.Fprintf(os.Stderr, "    %s -l 2222 -t cdn.example.com -d ssh.target.com:22\n\n", os.Args[0])
@@ -571,6 +735,7 @@ func main() {
 	flag.BoolVar(&debug, "debug", false, "")
 	flag.StringVar(&proxyURL, "p", "", "Proxy URL (http://host:port or socks5://host:port)")
 	flag.BoolVar(&insecureTLS, "insecure", false, "Disable TLS certificate verification (use with caution)")
+	flag.StringVar(&proto, "proto", "tcp", "Protocol for local listener and destination (tcp or udp)")
 	flag.Parse()
 
 	if len(os.Args) == 1 {
@@ -612,6 +777,12 @@ func main() {
 		destPort = 80
 	}
 
+	// Validate protocol
+	proto = strings.ToLower(proto)
+	if proto != "tcp" && proto != "udp" {
+		log.Fatal("Protocol must be either 'tcp' or 'udp'")
+	}
+
 	if debug {
 		log.SetFlags(log.Ldate | log.Ltime | log.Lmicroseconds | log.Lshortfile)
 		log.Printf("Debug mode enabled")
@@ -627,8 +798,11 @@ func main() {
 	}
 
 	if localAddr == "stdin:stdout" {
+		if proto == "udp" {
+			log.Fatal("UDP mode is not supported with stdin:stdout")
+		}
 		// Create client in stdin/stdout mode
-		client := NewClient(host, destPort, scheme, destAddr, debug, proxyURL,username, password, insecureTLS)
+		client := NewClient(host, destPort, scheme, destAddr, debug, proxyURL, username, password, insecureTLS, proto)
 		// Use os.Stdin and os.Stdout as the connection
 		stdinStdout := &StdinStdoutConn{
 			Reader: os.Stdin,
@@ -642,23 +816,28 @@ func main() {
 			log.Fatalf("Invalid local port: %v", err)
 		}
 
-		listener, err := net.Listen("tcp", fmt.Sprintf(":%d", localPort))
-		if err != nil {
-			log.Fatal(err)
-		}
-
-		log.Printf("DarkFlare client listening on port %d", localPort)
-		log.Printf("Connecting via %s://%s:%d", scheme, host, destPort)
-
-		for {
-			conn, err := listener.Accept()
+		if proto == "udp" {
+			client := NewClient(host, destPort, scheme, destAddr, debug, proxyURL, username, password, insecureTLS, proto)
+			client.handleUDPConnection(localPort)
+		} else {
+			listener, err := net.Listen("tcp", fmt.Sprintf(":%d", localPort))
 			if err != nil {
-				log.Printf("Error accepting connection: %v", err)
-				continue
+				log.Fatal(err)
 			}
 
-			client := NewClient(host, destPort, scheme, destAddr, debug, proxyURL,username, password, insecureTLS)
-			go client.handleConnection(conn)
+			log.Printf("DarkFlare client listening on port %d", localPort)
+			log.Printf("Connecting via %s://%s:%d", scheme, host, destPort)
+
+			for {
+				conn, err := listener.Accept()
+				if err != nil {
+					log.Printf("Error accepting connection: %v", err)
+					continue
+				}
+
+				client := NewClient(host, destPort, scheme, destAddr, debug, proxyURL, username, password, insecureTLS, proto)
+				go client.handleConnection(conn)
+			}
 		}
 	}
 }
